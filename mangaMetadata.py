@@ -1,11 +1,9 @@
 import requests, json, time, sys, os
 
-from io import StringIO, BytesIO
-
 from lxml import etree
 from lxml.etree import ParserError
 
-
+from ratelimiter import RateLimiter
 
 from playwright.sync_api import sync_playwright
 
@@ -40,6 +38,9 @@ try:
 except:
     ENV_PROGRESS = False
 
+
+anisearch_ratelimit_max_calls = os.environ.get('KOMGAANISEARCHRATELIMITMAXCALLS', 1000)
+anisearch_ratelimit_period = os.environ.get('KOMGAANISEARCHRATELIMITPERIOD', 3600)
 
 if (ENV_URL == "" and ENV_EMAIL == "" and ENV_PASS == "" and ENV_LANG == ""):
     try:
@@ -123,6 +124,7 @@ class metadata:
             self.tags = "[]"
             self.isvalid = False
 
+
 def getURLfromSearch(query):
     url = getBaseURL() + "manga/index?text=" + query + "&smode=1&sort=voter&order=desc&quick-search=&char=all&q=true"
 
@@ -159,211 +161,215 @@ def getURLfromSearch(query):
 
 #print(getURLfromSearch("adekan"))
 
+
+ratelimiter = RateLimiter(max_calls=anisearch_ratelimit_max_calls, period=anisearch_ratelimit_period)
+
 def getMangaMetadata(query):
-    print("Getting metadata for " + str(query))
-    status = ""         #done
-    summary = ""        #done
-    publisher = ""      #done
-#    agerating = ""
-    genres = "[]"
-    tags = "[]"
+    with ratelimiter:
+        print("Getting metadata for " + str(query))
+        status = ""         #done
+        summary = ""        #done
+        publisher = ""      #done
+    #    agerating = ""
+        genres = "[]"
+        tags = "[]"
 
-    data = metadata()
+        data = metadata()
 
-    URL = getURLfromSearch(query)
-    if(URL == ""):
-        print("No result found or error occured")
-        return data
+        URL = getURLfromSearch(query)
+        if(URL == ""):
+            print("No result found or error occured")
+            return data
 
-    time.sleep(1)
+        time.sleep(1)
 
-    resp = page.goto(URL)
-    content = page.content()
-    status_code = resp.status
+        resp = page.goto(URL)
+        content = page.content()
+        status_code = resp.status
 
-    if(status_code != 200):
-        print("return code was " + str(status_code) + ", skipping...")
-        return data
-    try:
-        parser = etree.HTMLParser()
-        html_dom = etree.HTML(content, parser)
-    except ParserError as e:
-        print(e)
-        return data
-
-    #getLangIndex
-    index = 1
-    rightIndex = -1
-    langRunning = True
-    while(langRunning):
+        if(status_code != 200):
+            print("return code was " + str(status_code) + ", skipping...")
+            return data
         try:
-            flag = html_dom.xpath("//*[@id=\"information\"]/div/ul/li[2]/ul/li[" + str(index) + "]/div[1]/img/@title")[0]
-            if(flag == getFlagLanguage()):
-                rightIndex = index
-#                print("Found correct Language, index is " + str(rightIndex))
+            parser = etree.HTMLParser()
+            html_dom = etree.HTML(content, parser)
+        except ParserError as e:
+            print(e)
+            return data
+
+        #getLangIndex
+        index = 1
+        rightIndex = -1
+        langRunning = True
+        while(langRunning):
+            try:
+                flag = html_dom.xpath("//*[@id=\"information\"]/div/ul/li[2]/ul/li[" + str(index) + "]/div[1]/img/@title")[0]
+                if(flag == getFlagLanguage()):
+                    rightIndex = index
+    #                print("Found correct Language, index is " + str(rightIndex))
+                    langRunning = False
+                    break
+                index += 1
+            except Exception as e:
                 langRunning = False
                 break
-            index += 1
-        except Exception as e:
-            langRunning = False
-            break
 
-    if(rightIndex == -1):
-        print("Failed to find set language, using first language as fallback")
-        rightIndex = 1
+        if(rightIndex == -1):
+            print("Failed to find set language, using first language as fallback")
+            rightIndex = 1
 
-    rightIndex = str(rightIndex)
+        rightIndex = str(rightIndex)
 
-    #getStatus
-    try:
-        status = html_dom.xpath("//*[@id=\"information\"]/div/ul/li[2]/ul/li[" + rightIndex + "]/div[2]")[0].itertext()
-        status = ''.join(status).split(": ")[1]
-    except Exception as e:
+        #getStatus
         try:
-            status = html_dom.xpath("//*[@id=\"information\"]/div/ul/li[2]/ul/li[1]/div[2]")[0].itertext()
+            status = html_dom.xpath("//*[@id=\"information\"]/div/ul/li[2]/ul/li[" + rightIndex + "]/div[2]")[0].itertext()
             status = ''.join(status).split(": ")[1]
         except Exception as e:
-            print(e)
-            print("Failed to get status")
-
-    if(status != ""):
-        if(status in runningLang):
-            casestatus = "\"ONGOING\""
-        elif(status in abandonedLang):
-            casestatus = "\"ABANDONED\""
-        elif(status in endedLang):
-            casestatus = "\"ENDED\""
-        else:
-            casestatus = "\"ENDED\""
-                
-            
-        data.status = casestatus
-
-
-    #getSummary
-    try:
-        summary = html_dom.xpath("//*[@id=\"description\"]/div/div/div[1]")[0].itertext()
-        summary = ''.join(summary)
-        for t in tagTexts:
-            if(t in summary):
-                raise Exception
-        for s in noSummaryLang:
-            if(s in summary):
-                raise Exception
-    except Exception as e:
-        engsum = ""
-        langsum = ""
-        sumindex = 1
-        noavail = False
-        while(True):
             try:
-                summary = html_dom.xpath("//*[@id=\"description\"]/div/div/section/div[" + str(sumindex) + "]")[0].itertext()
-                summary = ''.join(summary)
-                sumlang = html_dom.xpath("//*[@id=\"description\"]/div/div/section/button[" + str(sumindex) + "]")[0].itertext()
-                sumlang = ''.join(sumlang)
-                for s in noSummaryLang:
-                    if (s in summary):
-                        print("No summary available for this language")
-                        noavail = True
-                        continue
-                if (sumlang == getFlagLanguage() and noavail == False):
-                    langsum = summary
-                    break
-                elif (sumlang == "English"):
-                    engsum = summary
-                    if(noavail):
-                        break
-                sumindex += 1
+                status = html_dom.xpath("//*[@id=\"information\"]/div/ul/li[2]/ul/li[1]/div[2]")[0].itertext()
+                status = ''.join(status).split(": ")[1]
             except Exception as e:
-                break
+                print(e)
+                print("Failed to get status")
 
-        if(langsum != ""):
-            summary = langsum
-        else:
-            summary = engsum
-    if(summary != ""):
-        for b in blurbLang:
-            if(b in summary.split(":")[0]):
-                summary = summary[len(b):]
-
-        summarylist = summary.split(":")[:-1]
-        summary = ""
-        for s in summarylist:
-            summary += s
-            summary += ":"
-
-        if(summary[0:1] == ":"):
-            summary = summary[1:]
-
-        for sou in summarySourceLang:
-            l = len(sou)
-            if(summary[len(summary)-l:] == sou):
-                summary = summary[:len(summary) - l]
-                break
-
-        data.summary = summary
+        if(status != ""):
+            if(status in runningLang):
+                casestatus = "\"ONGOING\""
+            elif(status in abandonedLang):
+                casestatus = "\"ABANDONED\""
+            elif(status in endedLang):
+                casestatus = "\"ENDED\""
+            else:
+                casestatus = "\"ENDED\""
 
 
-    #getPublisher
-    try:
-        publisher = html_dom.xpath("//*[@id=\"information\"]/div/ul/li[2]/ul/li[" + rightIndex + "]/div[5]")[0].itertext()
-        publisher = ''.join(publisher)
-    except Exception as e:
+            data.status = casestatus
+
+
+        #getSummary
         try:
-            publisher = html_dom.xpath("//*[@id=\"information\"]/div/ul/li[2]/ul/li[1]/div[5]")[0].itertext()
+            summary = html_dom.xpath("//*[@id=\"description\"]/div/div/div[1]")[0].itertext()
+            summary = ''.join(summary)
+            for t in tagTexts:
+                if(t in summary):
+                    raise Exception
+            for s in noSummaryLang:
+                if(s in summary):
+                    raise Exception
+        except Exception as e:
+            engsum = ""
+            langsum = ""
+            sumindex = 1
+            noavail = False
+            while(True):
+                try:
+                    summary = html_dom.xpath("//*[@id=\"description\"]/div/div/section/div[" + str(sumindex) + "]")[0].itertext()
+                    summary = ''.join(summary)
+                    sumlang = html_dom.xpath("//*[@id=\"description\"]/div/div/section/button[" + str(sumindex) + "]")[0].itertext()
+                    sumlang = ''.join(sumlang)
+                    for s in noSummaryLang:
+                        if (s in summary):
+                            print("No summary available for this language")
+                            noavail = True
+                            continue
+                    if (sumlang == getFlagLanguage() and noavail == False):
+                        langsum = summary
+                        break
+                    elif (sumlang == "English"):
+                        engsum = summary
+                        if(noavail):
+                            break
+                    sumindex += 1
+                except Exception as e:
+                    break
+
+            if(langsum != ""):
+                summary = langsum
+            else:
+                summary = engsum
+        if(summary != ""):
+            for b in blurbLang:
+                if(b in summary.split(":")[0]):
+                    summary = summary[len(b):]
+
+            summarylist = summary.split(":")[:-1]
+            summary = ""
+            for s in summarylist:
+                summary += s
+                summary += ":"
+
+            if(summary[0:1] == ":"):
+                summary = summary[1:]
+
+            for sou in summarySourceLang:
+                l = len(sou)
+                if(summary[len(summary)-l:] == sou):
+                    summary = summary[:len(summary) - l]
+                    break
+
+            data.summary = summary
+
+
+        #getPublisher
+        try:
+            publisher = html_dom.xpath("//*[@id=\"information\"]/div/ul/li[2]/ul/li[" + rightIndex + "]/div[5]")[0].itertext()
             publisher = ''.join(publisher)
         except Exception as e:
-            print(e)
-            print("Failed to get publisher")
-    if(publisher != ""):
-        publisher = publisher.split(": ")[1]
-        data.publisher = publisher
+            try:
+                publisher = html_dom.xpath("//*[@id=\"information\"]/div/ul/li[2]/ul/li[1]/div[5]")[0].itertext()
+                publisher = ''.join(publisher)
+            except Exception as e:
+                print(e)
+                print("Failed to get publisher")
+        if(publisher != ""):
+            publisher = publisher.split(": ")[1]
+            data.publisher = publisher
 
-    #Tags & Genres
-    i = 1
-    running = True
-    genrelist = []
-    taglist = []
-    while(running):
-        try:
-            tag = html_dom.xpath("//*[@id=\"description\"]/div/div/ul/li[" + str(i) + "]")[0]
-            tagstring = ''.join(tag.itertext())
+        #Tags & Genres
+        i = 1
+        running = True
+        genrelist = []
+        taglist = []
+        while(running):
+            try:
+                tag = html_dom.xpath("//*[@id=\"description\"]/div/div/ul/li[" + str(i) + "]")[0]
+                tagstring = ''.join(tag.itertext())
 
 
-            tagurl = html_dom.xpath("//*[@id=\"description\"]/div/div/ul/li[" + str(i) + "]/a/@href")[0]
-            if("/genre/" in tagurl):
-                if(tagstring not in genrelist):
-                    genrelist.append(tagstring)
-            else:
-                if(tagstring not in taglist):
-                    taglist.append(tagstring)
-            i += 1
-        except Exception as e:
-#            print(e)
-            running = False
+                tagurl = html_dom.xpath("//*[@id=\"description\"]/div/div/ul/li[" + str(i) + "]/a/@href")[0]
+                if("/genre/" in tagurl):
+                    if(tagstring not in genrelist):
+                        genrelist.append(tagstring)
+                else:
+                    if(tagstring not in taglist):
+                        taglist.append(tagstring)
+                i += 1
+            except Exception as e:
+    #            print(e)
+                running = False
 
-    if(len(genrelist) > 0):
-        genres = "["
-        for idx, genre in enumerate(genrelist):
-            if(idx != 0):
-                genres += ",\n"
-            genres += "\"" + genre + "\""
-        genres += "]"
+        if(len(genrelist) > 0):
+            genres = "["
+            for idx, genre in enumerate(genrelist):
+                if(idx != 0):
+                    genres += ",\n"
+                genres += "\"" + genre + "\""
+            genres += "]"
 
-        data.genres = genres
+            data.genres = genres
 
-    if(len(taglist) > 0):
-        tags = "["
-        for idx, tag in enumerate(taglist):
-            if(idx != 0):
-                tags += ",\n"
-            tags += "\"" + tag + "\""
-        tags += "]"
+        if(len(taglist) > 0):
+            tags = "["
+            for idx, tag in enumerate(taglist):
+                if(idx != 0):
+                    tags += ",\n"
+                tags += "\"" + tag + "\""
+            tags += "]"
 
-        data.tags = tags
+            data.tags = tags
 
-    data.isvalid = True
-    return data
+        data.isvalid = True
+        return data
 
 p_context = sync_playwright()
 p = p_context.__enter__()
